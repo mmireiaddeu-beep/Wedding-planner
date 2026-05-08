@@ -10,11 +10,16 @@ export interface Guest {
   email: string;
   phone: string;
   allergies: string[];
+  allergyNotes: string;
   diet: DietType;
   rsvp: RSVPStatus;
   tableId: string;
   side: GuestSide;
   notes: string;
+  secondCourse: string;
+  companionName: string;
+  busService: boolean;
+  source: 'manual' | 'form';
 }
 
 export interface Table {

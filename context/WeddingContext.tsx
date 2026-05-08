@@ -1,17 +1,19 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { Guest, Table, Task, Vendor, Payment } from '@/lib/types';
 
 interface WeddingContextType {
   guests: Guest[];
+  guestsLoading: boolean;
   tables: Table[];
   tasks: Task[];
   vendors: Vendor[];
   payments: Payment[];
-  addGuest: (g: Omit<Guest, 'id'>) => void;
-  updateGuest: (g: Guest) => void;
-  deleteGuest: (id: string) => void;
+  refreshGuests: () => Promise<void>;
+  addGuest: (g: Omit<Guest, 'id'>) => Promise<void>;
+  updateGuest: (g: Guest) => Promise<void>;
+  deleteGuest: (id: string) => Promise<void>;
   addTable: (t: Omit<Table, 'id'>) => void;
   updateTable: (t: Table) => void;
   deleteTable: (id: string) => void;
@@ -25,7 +27,7 @@ interface WeddingContextType {
   addPayment: (p: Omit<Payment, 'id'>) => void;
   updatePayment: (p: Payment) => void;
   deletePayment: (id: string) => void;
-  assignGuestToTable: (guestId: string, tableId: string) => void;
+  assignGuestToTable: (guestId: string, tableId: string) => Promise<void>;
 }
 
 const WeddingContext = createContext<WeddingContextType | null>(null);
@@ -52,34 +54,65 @@ function usePersistedState<T>(key: string, initial: T): [T, React.Dispatch<React
 }
 
 export function WeddingProvider({ children }: { children: React.ReactNode }) {
-  const [guests, setGuests] = usePersistedState<Guest[]>('wp_guests', []);
+  const [guests, setGuests] = useState<Guest[]>([]);
+  const [guestsLoading, setGuestsLoading] = useState(true);
   const [tables, setTables] = usePersistedState<Table[]>('wp_tables', []);
   const [tasks, setTasks] = usePersistedState<Task[]>('wp_tasks', []);
   const [vendors, setVendors] = usePersistedState<Vendor[]>('wp_vendors', []);
   const [payments, setPayments] = usePersistedState<Payment[]>('wp_payments', []);
 
-  const addGuest = (g: Omit<Guest, 'id'>) => setGuests(prev => [...prev, { ...g, id: uid() }]);
-  const updateGuest = (g: Guest) => setGuests(prev => prev.map(x => x.id === g.id ? g : x));
-  const deleteGuest = (id: string) => {
+  const refreshGuests = useCallback(async () => {
+    try {
+      const res = await fetch('/api/guests');
+      if (res.ok) setGuests(await res.json());
+    } catch {}
+    finally { setGuestsLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    refreshGuests();
+    const interval = setInterval(refreshGuests, 30_000);
+    return () => clearInterval(interval);
+  }, [refreshGuests]);
+
+  const addGuest = async (g: Omit<Guest, 'id'>) => {
+    const res = await fetch('/api/guests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(g),
+    });
+    if (res.ok) {
+      const newGuest = await res.json();
+      setGuests(prev => [...prev, newGuest]);
+    }
+  };
+
+  const updateGuest = async (g: Guest) => {
+    const res = await fetch(`/api/guests/${g.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(g),
+    });
+    if (res.ok) setGuests(prev => prev.map(x => x.id === g.id ? g : x));
+  };
+
+  const deleteGuest = async (id: string) => {
+    await fetch(`/api/guests/${id}`, { method: 'DELETE' });
     setGuests(prev => prev.filter(x => x.id !== id));
     setTables(prev => prev.map(t => ({ ...t, guestIds: t.guestIds.filter(gid => gid !== id) })));
   };
 
-  const addTable = (t: Omit<Table, 'id'>) => setTables(prev => [...prev, { ...t, id: uid() }]);
-  const updateTable = (t: Table) => setTables(prev => prev.map(x => x.id === t.id ? t : x));
-  const deleteTable = (id: string) => {
-    setTables(prev => prev.filter(x => x.id !== id));
-    setGuests(prev => prev.map(g => g.tableId === id ? { ...g, tableId: '' } : g));
-  };
-
-  const assignGuestToTable = (guestId: string, tableId: string) => {
-    const prevTableId = guests.find(g => g.id === guestId)?.tableId;
+  const assignGuestToTable = async (guestId: string, tableId: string) => {
+    const guest = guests.find(g => g.id === guestId);
+    if (!guest) return;
+    const prevTableId = guest.tableId;
     if (prevTableId) {
       setTables(prev => prev.map(t =>
         t.id === prevTableId ? { ...t, guestIds: t.guestIds.filter(id => id !== guestId) } : t
       ));
     }
-    setGuests(prev => prev.map(g => g.id === guestId ? { ...g, tableId } : g));
+    const updated = { ...guest, tableId };
+    await updateGuest(updated);
     if (tableId) {
       setTables(prev => prev.map(t =>
         t.id === tableId && !t.guestIds.includes(guestId)
@@ -87,6 +120,13 @@ export function WeddingProvider({ children }: { children: React.ReactNode }) {
           : t
       ));
     }
+  };
+
+  const addTable = (t: Omit<Table, 'id'>) => setTables(prev => [...prev, { ...t, id: uid() }]);
+  const updateTable = (t: Table) => setTables(prev => prev.map(x => x.id === t.id ? t : x));
+  const deleteTable = (id: string) => {
+    setTables(prev => prev.filter(x => x.id !== id));
+    guests.filter(g => g.tableId === id).forEach(g => updateGuest({ ...g, tableId: '' }));
   };
 
   const addTask = (t: Omit<Task, 'id'>) => setTasks(prev => [...prev, { ...t, id: uid() }]);
@@ -107,7 +147,9 @@ export function WeddingProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <WeddingContext.Provider value={{
-      guests, tables, tasks, vendors, payments,
+      guests, guestsLoading,
+      tables, tasks, vendors, payments,
+      refreshGuests,
       addGuest, updateGuest, deleteGuest,
       addTable, updateTable, deleteTable,
       addTask, updateTask, deleteTask, toggleTask,
